@@ -4,6 +4,7 @@ import numpy as np
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from generate_outputs import generate
+import json
 
 @torch.inference_mode()
 def verify(
@@ -50,16 +51,16 @@ def verify(
     if fail_mask.any():
         n = int(fail_mask.nonzero(as_tuple=True)[0][0])
         first_fail = int(fail_mask.nonzero(as_tuple=True)[0][0])
-        print(" n (first rejection index):", first_fail)
-        print(" Drafter token probabilities: p =", float(p_token[first_fail]), 
-            ", q =", float(q_token[first_fail]), 
-            ", ratio =", float(ratio[first_fail]), 
-            ", r =", float(r[first_fail]))
-        print(" Rejected drafter token: ",
-            tokenizer.decode(int(drafter_tokens[first_fail])))
+        # print(" n (first rejection index):", first_fail)
+        # print(" Drafter token probabilities: p =", float(p_token[first_fail]), 
+        #     ", q =", float(q_token[first_fail]), 
+        #     ", ratio =", float(ratio[first_fail]), 
+        #     ", r =", float(r[first_fail]))
+        # print(" Rejected drafter token: ",
+        #     tokenizer.decode(int(drafter_tokens[first_fail])))
     else:
         n = gamma
-    print(f"n: {n}")
+    # print(f"n: {n}")
 
     p_next = verifier_probs[n]
     if n < gamma:
@@ -76,18 +77,19 @@ def verify(
     return verified_tokens
 
 @torch.inference_mode()
-def speculative_decoding_step(prompt_tokens, drafter, verifier, tokenizer, max_length=50):
+def speculative_decoding_step(prompt_tokens, drafter, verifier, tokenizer, rng=None, sampling_method=None, max_length=10):
     drafter_token_seqs = [prompt_tokens]
     drafter_tokens = []
     drafter_probs = []
 
-    for _ in range(max_length):
-        drafter_token, probs = generate(drafter, drafter_token_seqs[-1])
-        drafter_tokens.append(drafter_token)
-        drafter_probs.append(probs)
-        drafter_token_seqs.append(torch.cat([drafter_token_seqs[-1], torch.tensor([drafter_token], dtype=drafter_token_seqs[-1].dtype, device=drafter_token_seqs[-1].device).unsqueeze(0)], dim=1))
-    drafter_outputs = tokenizer.decode(drafter_token_seqs[-1].squeeze(0), skip_special_tokens=True)
-    print(f"Drafter Output: {drafter_outputs}")
+    with torch.no_grad():
+        for _ in range(max_length):
+            drafter_token, probs = generate(drafter, drafter_token_seqs[-1])
+            drafter_tokens.append(drafter_token)
+            drafter_probs.append(probs)
+            drafter_token_seqs.append(torch.cat([drafter_token_seqs[-1], torch.tensor([drafter_token], dtype=drafter_token_seqs[-1].dtype, device=drafter_token_seqs[-1].device).unsqueeze(0)], dim=1))
+        drafter_outputs = tokenizer.decode(drafter_token_seqs[-1].squeeze(0), skip_special_tokens=True)
+    # print(f"Drafter Output: {drafter_outputs}")
 
     drafter_tokens = torch.tensor(drafter_tokens, device=drafter_token_seqs[0].device, dtype=drafter_token_seqs[0].dtype)
     drafter_probs =  torch.stack(drafter_probs, dim=0).to(device=drafter_token_seqs[0].device, dtype=torch.float32)
@@ -98,31 +100,65 @@ def speculative_decoding_step(prompt_tokens, drafter, verifier, tokenizer, max_l
         drafter_tokens,
         drafter_probs 
     )
-    verified_output = tokenizer.decode(verified_tokens.tolist(), skip_special_tokens=True)
-    return verified_tokens
+    # verified_output = tokenizer.decode(verified_tokens.tolist(), skip_special_tokens=True)
+    return verified_tokens.tolist()
 
 def speculative_decoding(prompt, drafter, verifier, tokenizer): 
     prompt_tokens = tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
     for _ in range(10):
         verified_tokens = speculative_decoding_step(prompt_tokens, drafter, verifier, tokenizer, max_length=10)
-        prompt_tokens = torch.cat([prompt_tokens, verified_tokens.unsqueeze(0)], dim=1)
+        prompt_tokens = torch.cat([prompt_tokens, torch.tensor(verified_tokens).cuda().unsqueeze(0)], dim=1)
         prompt_updated = tokenizer.decode(prompt_tokens[0].tolist(), skip_special_tokens=True)
-        print(f"Prompt Updated: {prompt_updated}")
+        # print(f"Prompt Updated: {prompt_updated}")
 
-prompt = "Write me a poem about Machine Learning."
-tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b-it")
 
-drafter = AutoModelForCausalLM.from_pretrained(
-    "google/gemma-2b-it",
-    device_map="auto",
-    torch_dtype=torch.bfloat16
-)
+if __name__ == "__main__":
+    # prompt = "Write me a poem about Machine Learning."
+    tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b-it")
 
-# verifier = AutoModelForCausalLM.from_pretrained(
-#     "google/gemma-2-27b-it",
-#     device_map="auto",
-#     torch_dtype=torch.bfloat16,
-# )
+    drafter = AutoModelForCausalLM.from_pretrained(
+        "google/gemma-2b-it",
+        device_map="auto",
+        torch_dtype=torch.bfloat16
+    )
+
+    verifier = AutoModelForCausalLM.from_pretrained(
+        "google/gemma-2-27b-it",
+        device_map="auto",
+        torch_dtype=torch.bfloat16,
+    )
+
+    with open("/scratch/xh2433/amlds_final_project/HC3_datasets/open_qa.jsonl", "r") as f:
+        data = [json.loads(line.strip()) for line in f]
+    data = data[:500]
+
+    result = {}
+
+    for i, item in enumerate(data):
+        print(f"Processing item {i+1}/{len(data)}")
+        prompt = item["question"]
+        prompt_tokens = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to("cuda").input_ids
+
+        generated_answers = []
+        for _ in range(3):
+            while True:
+                verified_tokens = speculative_decoding_step(prompt_tokens, drafter, verifier, tokenizer, max_length=10)
+                prompt_tokens = torch.cat([prompt_tokens, torch.tensor(verified_tokens).cuda().unsqueeze(0)], dim=1)
+                prompt_updated = tokenizer.decode(prompt_tokens[0].tolist(), skip_special_tokens=True)
+                print(f"Prompt Updated: {prompt_updated}")
+                last_token_id = prompt_tokens[0, -1].item()
+                if last_token_id == tokenizer.eos_token_id:
+                    break
+                            
+            generated_answers.append(prompt_updated)
+        result[i] = {"question": prompt, "answer": generated_answers, "human_answers": item["human_answers"][0]}
+        
+        if (i + 1) % 20 == 0:
+            with open("speculative_decoding_results.json", "w") as f:
+                json.dump(result, f, indent=4)
+    
+    
+
 
 
 

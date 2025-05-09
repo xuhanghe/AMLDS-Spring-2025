@@ -103,9 +103,7 @@ def _get_sbert(model_name):
 def experiment_sbert_cosine(prompt, generated_answer, tokenizer, human_answer,
                             model_name="sentence-transformers/all-MiniLM-L6-v2"):
     """
-    质量：Sentence-BERT 余弦相似度（越高越好，∈[0,1]）
-    --------------------------------------------------
-    • 适合评估长文本语义一致性。
+        the greater the better
     """
     sbert = _get_sbert(model_name)
     emb_gen  = sbert.encode(generated_answer, convert_to_tensor=True)

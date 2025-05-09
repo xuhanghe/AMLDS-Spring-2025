@@ -1,1 +1,6 @@
 HC3_datasets/*.jsonl
+outputs.txt
+__pycache__/
+jobs/
+*.json
+test_quality.py
