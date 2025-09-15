@@ -1,1 +1,1 @@
-# AMLDS-Spring-2025
+# Communication Free Speculative Decoding Benchmark
